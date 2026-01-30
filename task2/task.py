@@ -1,83 +1,106 @@
-from math import e, log, log2
-from typing import Dict, List, Tuple
+from math import e, log2
+import numpy as np
+from collections import defaultdict
 
 
-def mark_reachable(src: int, node: int, graph: Dict[int, List[int]], reach: List[List[bool]]) -> None:
-    for nxt in graph.get(node, []):
-        if not reach[src - 1][nxt - 1]:
-            reach[src - 1][nxt - 1] = True
-            mark_reachable(src, nxt, graph, reach)
+def dfs(graph, edge, seen=None, path=None):
+    if seen is None:
+        seen = []
+    if path is None:
+        path = [edge]
+    
+    seen.append(edge)
+    paths = []
+    
+    for e in graph[edge]:
+        if e not in seen:
+            t_path = path + [e]
+            paths.append(tuple(t_path))
+            paths.extend(dfs(graph, e, seen[:], t_path))
+    
+    return paths
 
 
-def build_relations(edges_text: str) -> Tuple[
-    List[List[bool]],
-    List[List[bool]],
-    List[List[bool]],
-    List[List[bool]],
-    List[List[bool]],
-]:
-    edges = [tuple(map(int, line.split(","))) for line in edges_text.splitlines() if line.strip()]
-    n = max(max(u, v) for u, v in edges)
-
-    direct_parent = [[False] * n for _ in range(n)]
-    graph: Dict[int, List[int]] = {i: [] for i in range(1, n + 1)}
-    parent_of: Dict[int, int] = {}
-
-    for u, v in edges:
-        direct_parent[u - 1][v - 1] = True
-        graph[u].append(v)
-        parent_of[v] = u
-
-    direct_child = [[direct_parent[j][i] for j in range(n)] for i in range(n)]
-
-    reach = [[False] * n for _ in range(n)]
-    for v in range(1, n + 1):
-        mark_reachable(v, v, graph, reach)
-
-    indirect_parent = [[False] * n for _ in range(n)]
-    for i in range(n):
-        for j in range(n):
-            if i != j and reach[i][j] and not direct_parent[i][j]:
-                indirect_parent[i][j] = True
-
-    indirect_child = [[indirect_parent[j][i] for j in range(n)] for i in range(n)]
-
-    co_level = [[False] * n for _ in range(n)]
-    for i in range(1, n + 1):
-        pi = parent_of.get(i)
-        if pi is None:
-            continue
-        for j in range(1, n + 1):
-            if i != j and parent_of.get(j) == pi:
-                co_level[i - 1][j - 1] = True
-
-    return direct_parent, direct_child, indirect_parent, indirect_child, co_level
-
-
-def compute_entropy(edges_text: str) -> Tuple[float, float]:
-    rels = build_relations(edges_text)
-    n = len(rels[0])
-    k = len(rels)
-
-    total = 0.0
-    denom = (n - 1)
-
-    for i in range(n):
-        for r in rels:
-            cnt = sum(r[i])
-            if cnt:
-                p = cnt / denom
-                total += -p * log2(p)
-
-    ref = (1 / (e * log(2))) * n * k
-    normalized = total / ref
-
-    return round(total, 1), round(normalized, 1)
+def task1(s: str) -> tuple[list[list[bool]], list[list[bool]], list[list[bool]], list[list[bool]], list[list[bool]]]:
+    pairs = [item.split(',') for item in s.split('\n')]
+    
+    graph_dict = defaultdict(list)
+    for (parent, child) in pairs:
+        graph_dict[parent].append(child)
+    
+    vertexes = []
+    for item in pairs:
+        if item[0] not in vertexes:
+            vertexes.append(item[0])
+        if item[1] not in vertexes:
+            vertexes.append(item[1])
+    
+    index = {v: i for i, v in enumerate(vertexes)}
+    n = len(vertexes)
+    
+    r1 = np.zeros((n, n), bool)
+    for key in graph_dict:
+        parent_idx = index[key]
+        for child in graph_dict[key]:
+            r1[parent_idx][index[child]] = 1
+    
+    r2 = r1.T
+    
+    r3 = np.zeros((n, n), bool)
+    A = np.dot(r1, r1)
+    
+    max_path_len = max(len(p) for p in dfs(graph_dict, pairs[0][0]))
+    for i in range(max_path_len - 2):
+        r3[np.logical_or(r3, A)] = 1
+        A = np.dot(A, r1)
+    
+    r4 = r3.T
+    
+    r5 = np.zeros((n, n), bool)
+    for parent in graph_dict:
+        children = graph_dict[parent]
+        if len(children) > 1:
+            for i in range(len(children)):
+                first_idx = index[children[i]]
+                for sibling in children[i + 1:]:
+                    second_idx = index[sibling]
+                    r5[first_idx][second_idx] = 1
+    
+    r5[np.logical_or(r5, r5.T)] = 1
+    
+    return (r1.tolist(), r2.tolist(), r3.tolist(), r4.tolist(), r5.tolist())
 
 
-if __name__ == "__main__":
-    s = "1,2\n1,3\n3,4\n3,5"
-    H, h = compute_entropy(s)
+def entropy(num: float) -> float:
+    if num != 0:
+        return -num * log2(num)
+    return 0.0
 
-    print("Энтропия:", H)
-    print("Нормированная сложность:", h)
+
+def main(s: str) -> tuple[float, float]:
+    relation_matrices = task1(s)
+    k = 5
+    n = len(relation_matrices[0])
+    
+    out_connections = np.zeros((n, k), int)
+    for relation_idx, matrix in enumerate(relation_matrices):
+        for node_idx in range(n):
+            out_connections[node_idx][relation_idx] = sum(matrix[node_idx])
+    
+    H_sum = sum(
+        entropy(float(row[i] / sum(row)))
+        for i in range(k)
+        for row in out_connections
+    )
+    
+    C = -1 / e * log2(1 / e)
+    H_ref = C * n * k
+    h = H_sum / H_ref
+    
+    print(H_ref)
+    return (round(H_sum, 1), round(h, 1))
+
+
+csv_string = "1,2\n1,3\n3,4\n3,5"
+csv_string1 = "1,2\n2,3\n2,4\n4,5\n4,6"
+print(main(csv_string1))

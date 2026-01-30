@@ -1,102 +1,165 @@
 import json
-import numpy as np
-from typing import Any, List, Dict
+import ast
+from typing import List, Dict, Tuple
 
-def normalize_to_list(item: Any) -> List:
-    return item if isinstance(item, list) else [item]
 
-def flatten_ranking(ranking: List) -> List:
-    flattened = []
-    for group in ranking:
-        flattened.extend(normalize_to_list(group))
-    return flattened
-
-def build_preference_matrix(ranking: List, items: List) -> np.ndarray:
-    n = len(items)
-    item_to_index = {item: idx for idx, item in enumerate(items)}
-    matrix = np.zeros((n, n), dtype=int)
+def calculate_membership(value: float, points: List[List[float]]) -> float:
+    x1, y1 = points[0]
+    x2, y2 = points[1]
+    x3, y3 = points[2]
+    x4, y4 = points[3]
     
-    for level, current_group in enumerate(ranking):
-        current_group = normalize_to_list(current_group)
-        
-        for item in current_group:
-            item_idx = item_to_index[item]
-            matrix[item_idx, :] = 1
-        
-        for previous_group in ranking[:level]:
-            previous_group = normalize_to_list(previous_group)
-            for current_item in current_group:
-                current_idx = item_to_index[current_item]
-                for previous_item in previous_group:
-                    previous_idx = item_to_index[previous_item]
-                    matrix[current_idx, previous_idx] = 0
-                    matrix[previous_idx, current_idx] = 1
-    
-    return matrix
+    if value < x1:
+        return y1
+    elif x1 <= value < x2:
+        if x2 == x1:
+            return y1
+        return y1 + (y2 - y1) * (value - x1) / (x2 - x1)
+    elif x2 <= value <= x3:
+        return y2
+    elif x3 < value <= x4:
+        if x4 == x3:
+            return y3
+        return y3 + (y4 - y3) * (value - x3) / (x4 - x3)
+    else:
+        return y4
 
-def find_contradictions(matrix_a: np.ndarray, matrix_b: np.ndarray, items: List) -> List[List]:
-    n = len(items)
-    contradictions = []
+
+def fuzzify_input(temperature: float, temp_sets: List[Dict]) -> Dict[str, float]:
+    memberships = {}
+    for term in temp_sets:
+        membership = calculate_membership(temperature, term["points"])
+        memberships[term["id"]] = membership
+    return memberships
+
+
+def find_matching_term(term_name: str, available_terms: Dict[str, List]) -> str:
+    if term_name in available_terms:
+        return term_name
+    
+    mappings = {
+        "нормально": "комфортно",
+        "интенсивно": "интенсивный",
+        "умеренно": "умеренный",
+        "слабо": "слабый"
+    }
+    
+    if term_name in mappings and mappings[term_name] in available_terms:
+        return mappings[term_name]
+    
+    term_lower = term_name.lower()
+    best_match = None
+    best_match_length = 0
+    
+    for key in available_terms.keys():
+        key_lower = key.lower()
+        if term_lower in key_lower or key_lower in term_lower:
+            match_length = min(len(term_lower), len(key_lower))
+            if match_length > best_match_length:
+                best_match = key
+                best_match_length = match_length
+    
+    if best_match is None:
+        for key in available_terms.keys():
+            key_lower = key.lower()
+            for prefix_len in range(6, 3, -1):
+                if (len(term_lower) >= prefix_len and len(key_lower) >= prefix_len and
+                    term_lower[:prefix_len] == key_lower[:prefix_len]):
+                    return key
+    
+    return best_match
+
+
+def apply_rule(activation: float, output_points: List[List[float]], 
+               x_values: List[float]) -> List[float]:
+    result = []
+    for x in x_values:
+        mu_output = calculate_membership(x, output_points)
+        result.append(min(activation, mu_output))
+    return result
+
+
+def aggregate_rules(rule_outputs: List[List[float]]) -> List[float]:
+    if not rule_outputs:
+        return []
+    
+    n = len(rule_outputs[0])
+    aggregated = []
     
     for i in range(n):
-        for j in range(i + 1, n):
-            a_prefers_i_over_j = matrix_a[i, j] == 1 and matrix_a[j, i] == 0
-            b_prefers_j_over_i = matrix_b[i, j] == 0 and matrix_b[j, i] == 1
-            
-            if a_prefers_i_over_j and b_prefers_j_over_i:
-                contradictions.append([items[i], items[j]])
-            
-            a_prefers_j_over_i = matrix_a[i, j] == 0 and matrix_a[j, i] == 1
-            b_prefers_i_over_j = matrix_b[i, j] == 1 and matrix_b[j, i] == 0
-            
-            if a_prefers_j_over_i and b_prefers_i_over_j:
-                contradictions.append([items[j], items[i]])
+        max_val = max(output[i] for output in rule_outputs)
+        aggregated.append(max_val)
     
-    return contradictions
+    return aggregated
 
-def build_consensus_ranking(items: List, contradictions: List[List]) -> List:
-    conflict_map: Dict[Any, List] = {}
-    for item_a, item_b in contradictions:
-        conflict_map.setdefault(item_a, []).append(item_b)
+
+def defuzzify_first_max(memberships: List[float], x_values: List[float]) -> float:
+    if not memberships:
+        return 0.0
     
-    result = []
-    processed = set()
+    max_membership = max(memberships)
     
-    for item in items:
-        if item in processed:
+    for i, membership in enumerate(memberships):
+        if membership == max_membership:
+            return x_values[i]
+    
+    return x_values[0]
+
+
+def main(temp_sets_json: str, 
+         control_sets_json: str, 
+         rules_json: str, 
+         temperature: float) -> float:
+    
+    temp_data = json.loads(temp_sets_json)
+    control_data = json.loads(control_sets_json)
+    
+    try:
+        rules = json.loads(rules_json)
+    except json.JSONDecodeError:
+        rules = ast.literal_eval(rules_json)
+    
+    temp_sets = next(v for v in temp_data.values() if isinstance(v, list))
+    control_sets = next(v for v in control_data.values() if isinstance(v, list))
+    
+    min_x = float('inf')
+    max_x = float('-inf')
+    for term in control_sets:
+        for point in term["points"]:
+            min_x = min(min_x, point[0])
+            max_x = max(max_x, point[0])
+    
+    step = 0.1
+    x_values = []
+    x = min_x
+    while x <= max_x:
+        x_values.append(x)
+        x += step
+    
+    temp_memberships = fuzzify_input(temperature, temp_sets)
+    
+    temp_dict = {term["id"]: term["points"] for term in temp_sets}
+    control_dict = {term["id"]: term["points"] for term in control_sets}
+    
+    rule_outputs = []
+    
+    for input_term_name, output_term_name in rules:
+        input_term = find_matching_term(input_term_name, temp_dict)
+        output_term = find_matching_term(output_term_name, control_dict)
+        
+        if input_term is None or output_term is None:
             continue
         
-        if item in conflict_map:
-            group = [item]
-            processed.add(item)
-            
-            for conflicting_item in conflict_map[item]:
-                if conflicting_item not in processed:
-                    group.append(conflicting_item)
-                    processed.add(conflicting_item)
-            
-            result.append(group)
-        else:
-            result.append(item)
-            processed.add(item)
+        activation = temp_memberships.get(input_term, 0.0)
+        output_points = control_dict[output_term]
+        
+        rule_output = apply_rule(activation, output_points, x_values)
+        rule_outputs.append(rule_output)
+    
+    aggregated = aggregate_rules(rule_outputs)
+    result = defuzzify_first_max(aggregated, x_values)
     
     return result
 
-def merge_rankings(json_ranking_a: str, json_ranking_b: str) -> str:
-    ranking_a = json.loads(json_ranking_a)
-    ranking_b = json.loads(json_ranking_b)
-    
-    all_items = sorted(set(flatten_ranking(ranking_a)) | set(flatten_ranking(ranking_b)))
-    
-    matrix_a = build_preference_matrix(ranking_a, all_items)
-    matrix_b = build_preference_matrix(ranking_b, all_items)
-    
-    contradictions = find_contradictions(matrix_a, matrix_b, all_items)
-    consensus_ranking = build_consensus_ranking(all_items, contradictions)
-    
-    return json.dumps(consensus_ranking, ensure_ascii=False)
 
-if __name__ == "__main__":
-    ranking_a = json.dumps([1, [2, 3], 4, [5, 6, 7], 8, 9, 10])
-    ranking_b = json.dumps([[1, 2], [3, 4, 5], 6, 7, 9, [8, 10]])
-    print(merge_rankings(ranking_a, ranking_b))
+__all__ = ["main"]
